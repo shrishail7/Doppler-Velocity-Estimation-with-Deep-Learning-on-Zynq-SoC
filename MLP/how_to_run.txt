@@ -1,0 +1,5 @@
+gcc -std=c99 -O2 -Wall -o mlp_app.exe main.c mlp_run.c -lm
+chcp 65001
+.\mlp_app.exe
+
+Remove-Item mlp_app.exe -Force
