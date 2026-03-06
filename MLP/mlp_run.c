@@ -1,12 +1,11 @@
-/* mlp_run.c â€” Clean version, no duplicates */
+/* mlp_run.c — Clean version, no duplicates */
 #include "mlp_run.h"
 #include "mlp_weights_data.h"
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
 
-// #define LN_EPS 1e-5f
-#define LN_EPS 1e-8f
+#define LN_EPS 1e-5f   /* PyTorch nn.LayerNorm default */
 #define MLP_PRINT printf
 
 static MLP_Instance g_mlp;
@@ -16,14 +15,14 @@ static inline float relu_f(float v) { return v > 0.0f ? v : 0.0f; }
 static void layer_norm(const float * restrict in, float * restrict out, int n,
                        const float *gamma, const float *beta)
 {
-    float mean = 0.0f, var = 0.0f;
-    for (int i = 0; i < n; i++) mean += in[i];
-    mean /= (float)n;
-    for (int i = 0; i < n; i++) { float d = in[i] - mean; var += d * d; }
-    var /= (float)n;
-    float inv_std = 1.0f / sqrtf(var + LN_EPS);
+    double mean = 0.0, var = 0.0;
+    for (int i = 0; i < n; i++) mean += (double)in[i];
+    mean /= (double)n;
+    for (int i = 0; i < n; i++) { double d = (double)in[i] - mean; var += d * d; }
+    var /= (double)n;
+    float inv_std = 1.0f / sqrtf((float)var + LN_EPS);
     for (int i = 0; i < n; i++)
-        out[i] = gamma[i] * ((in[i] - mean) * inv_std) + beta[i];
+        out[i] = gamma[i] * ((in[i] - (float)mean) * inv_std) + beta[i];
 }
 
 static void linear_layer(const float * restrict in, int n_in,
@@ -31,10 +30,10 @@ static void linear_layer(const float * restrict in, int n_in,
                          const float *W, const float *b)
 {
     for (int o = 0; o < n_out; o++) {
-        float acc = b[o];
+        double acc = (double)b[o];
         for (int i = 0; i < n_in; i++)
-            acc += W[o * n_in + i] * in[i];
-        out[o] = acc;
+            acc += (double)W[o * n_in + i] * (double)in[i];
+        out[o] = (float)acc;
     }
 }
 
