@@ -1,17 +1,18 @@
-/* mlp_run.c — Clean version, no duplicates */
 #include "mlp_run.h"
 #include "mlp_weights_data.h"
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
 
-#define LN_EPS 1e-5f   /* PyTorch nn.LayerNorm default */
+#define LN_EPS 1e-5f
 #define MLP_PRINT printf
 
 static MLP_Instance g_mlp;
 
+// activation function (ignore negative value and make it 0)
 static inline float relu_f(float v) { return v > 0.0f ? v : 0.0f; }
 
+// normalisation of layer
 static void layer_norm(const float * restrict in, float * restrict out, int n,
                        const float *gamma, const float *beta)
 {
@@ -25,6 +26,7 @@ static void layer_norm(const float * restrict in, float * restrict out, int n,
         out[i] = gamma[i] * ((in[i] - (float)mean) * inv_std) + beta[i];
 }
 
+// linear function to add scale and bias ( y = W*in+b )
 static void linear_layer(const float * restrict in, int n_in,
                          float * restrict out, int n_out,
                          const float *W, const float *b)
@@ -37,13 +39,15 @@ static void linear_layer(const float * restrict in, int n_in,
     }
 }
 
+
+// reading inputs 
 int mlp_init(void)
 {
     if (g_mlp.initialized) return 0;
     
     MLP_PRINT("[MLP] Loading weights...\r\n");
     
-    /* fc1 */
+    /* fc1 : for layer 1 */
     for (int i = 0; i < MLP_N_H1; i++)
         for (int j = 0; j < MLP_N_IN; j++)
             g_mlp.fc1_W[i][j] = fc1_W[i * MLP_N_IN + j];
@@ -51,7 +55,7 @@ int mlp_init(void)
     memcpy(g_mlp.ln1_g, ln1_g, sizeof(float) * MLP_N_H1);
     memcpy(g_mlp.ln1_b, ln1_b, sizeof(float) * MLP_N_H1);
     
-    /* fc2 */
+    /* fc2 : for layer 2  */
     for (int i = 0; i < MLP_N_H2; i++)
         for (int j = 0; j < MLP_N_H1; j++)
             g_mlp.fc2_W[i][j] = fc2_W[i * MLP_N_H1 + j];
@@ -59,7 +63,7 @@ int mlp_init(void)
     memcpy(g_mlp.ln2_g, ln2_g, sizeof(float) * MLP_N_H2);
     memcpy(g_mlp.ln2_b, ln2_b, sizeof(float) * MLP_N_H2);
     
-    /* fc3 */
+    /* fc3 : for layer 3  */
     for (int i = 0; i < MLP_N_OUT; i++)
         for (int j = 0; j < MLP_N_H2; j++)
             g_mlp.fc3_W[i][j] = fc3_W[i * MLP_N_H2 + j];
@@ -69,6 +73,8 @@ int mlp_init(void)
     MLP_PRINT("[MLP] Ready.\r\n");
     return 0;
 }
+
+// running mlp algorithm by passing inputs , weights bias to various layers
 
 void mlp_forward(const float x[MLP_N_IN], float y[MLP_N_OUT])
 {

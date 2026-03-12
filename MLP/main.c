@@ -1,13 +1,19 @@
 
-
-#include "inputs.h"
-#include "mlp_run.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <complex.h>
+#include <xtime_l.h>
 #include <math.h>
 
-static inline void init_platform(void) {}
-static inline void cleanup_platform(void) {}
+#include "platform.h"
+#include "xil_printf.h"
+#include "xparameters.h"
+#include "inputs.h"
+#include "mlp_run.h"
 
+const char *snr_labels[3] = {"-20dB", "0dB", "20dB"};
+
+// generating 40 real inputs from the 20 complex inputs
 static void build_input(const Complex *data, float *x)
 {
     for (int i = 0; i < N_SAMPLES; i++) {
@@ -16,9 +22,10 @@ static void build_input(const Complex *data, float *x)
     }
 }
 
+// print function
 static void print_result(int id, int snr, float p1, float p2, double g1, double g2)
 {
-    double e1 = (double)p1 - g1, e2 = (double)p2 - g2;
+    double e1 = fabs(g1) - fabs((double)p1), e2 =   fabs(g2)- fabs((double)p2);
     printf("\r\n+ Sample %2d (SNR %4d dB) +\r\n", id, snr);
     printf("  Pred: [%+.20f, %+.20f]\r\n", (double)p1, (double)p2);
     printf("  GT:   [%+.20f, %+.20f]\r\n", g1, g2);
@@ -28,8 +35,13 @@ static void print_result(int id, int snr, float p1, float p2, double g1, double 
 int main(void)
 {
     init_platform();
-    printf("MLP Doppler Inference — 20+ Digit Precision\r\n");
+
+    // timing variables
+    XTime PS_Start , PS_End;
+    XTime_SetTime(0);
+    XTime_GetTime(&PS_Start);
     
+    // checking initialisation
     if (mlp_init() != 0) { printf("Init failed\r\n"); return -1; }
     
     // Accumulators for RMSE per SNR group (index: 0 = -20, 1 = 0, 2 = 20)
@@ -37,9 +49,14 @@ int main(void)
     double sum_sq_err_v1[3] = {0.0};
     double sum_sq_err_v2[3] = {0.0};
     
+    // iterating all the inputs
     for (int s = 0; s < NUM_SAMPLES; s++) {
         float x[MLP_N_IN], y[MLP_N_OUT];
+
+        // converting 20 comples inputs into 40 real inputs
         build_input(dataset[s].data, x);
+
+        // applying MLP function to input
         mlp_forward(x, y);
         
         double pred1 = (double)y[0];
@@ -67,18 +84,23 @@ int main(void)
         count_snr[snr_idx]++;
     }
     
-    // Compute and print RMSE for each SNR group
-    const char *snr_labels[] = {"-20 dB", "0 dB", "+20 dB"};
-    printf("\r\nRMSE (magnitude difference) per SNR group:\r\n");
+    XTime_GetTime(&PS_End);
+
+
+
+    // evaluating RMSE
+    printf("\r\nRMSE per SNR group:\r\n");
     for (int i = 0; i < 3; i++) {
         if (count_snr[i] > 0) {
-            double rmse_v1 = sqrt(sum_sq_err_v1[i] / count_snr[i]);
-            double rmse_v2 = sqrt(sum_sq_err_v2[i] / count_snr[i]);
-            printf("SNR %s: Vel1 RMSE = %.20f m/s, Vel2 RMSE = %.20f m/s\r\n",
-                   snr_labels[i], rmse_v1, rmse_v2);
+            double rmse = sqrt((sum_sq_err_v1[i] + sum_sq_err_v2[i]) / (2.0 * count_snr[i]));
+            printf("SNR %s: RMSE = %.20f m/s\r\n", snr_labels[i], rmse);
         }
     }
     
+    float execution_time = (float)1.0*((PS_End - PS_Start))/(COUNTS_PER_SECOND/1000);
+
+    printf("Average Execution Time per input ( in milli-sec )  = %f \n", execution_time/15);
+
     cleanup_platform();
     return 0;
 }
