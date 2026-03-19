@@ -22,6 +22,11 @@ static void build_input(const Complex *data, float *x)
     }
 }
 
+// Add this helper function before main()
+static void sort2_double(double *a, double *b) {
+    if (*a > *b) { double tmp = *a; *a = *b; *b = tmp; }
+}
+
 // print function
 static void print_result(int id, int snr, float p1, float p2, double g1, double g2)
 {
@@ -77,8 +82,15 @@ int main(void)
         if (snr_idx < 0) continue; // should not happen
         
         // Accumulate squared error of magnitudes (|gt| - |pred|)^2
-        double err_mag1 = fabs(gt1) - fabs(pred1);
-        double err_mag2 = fabs(gt2) - fabs(pred2);
+//        double err_mag1 = fabs(gt1) - fabs(pred1);
+//        double err_mag2 = fabs(gt2) - fabs(pred2);
+        double sp1 = pred1, sp2 = pred2;
+        double sg1 = gt1,   sg2 = gt2;
+        sort2_double(&sp1, &sp2);   // sort predictions ascending
+        sort2_double(&sg1, &sg2);   // sort GT ascending
+
+        double err_mag1 = sg1 - sp1;  // direct diff on sorted values
+        double err_mag2 = sg2 - sp2;
         sum_sq_err_v1[snr_idx] += err_mag1 * err_mag1;
         sum_sq_err_v2[snr_idx] += err_mag2 * err_mag2;
         count_snr[snr_idx]++;

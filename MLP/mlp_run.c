@@ -1,8 +1,8 @@
 #include "mlp_run.h"
-#include "mlp_weights_data.h"
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#include "mlp_weights_data.h"
 
 #define LN_EPS 1e-5f
 #define MLP_PRINT printf
@@ -40,7 +40,7 @@ static void linear_layer(const float * restrict in, int n_in,
 }
 
 
-// reading inputs 
+// reading inputs
 int mlp_init(void)
 {
     if (g_mlp.initialized) return 0;

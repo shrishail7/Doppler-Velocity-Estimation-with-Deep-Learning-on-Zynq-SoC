@@ -364,6 +364,7 @@ void qr_algorithm_eig_single(const Complex *A_input, int n, int max_iterations, 
 // Python Reference: Cell 6, internal call to np.linalg.pinv(subA1)
 // Logic: Specifically calculates the Moore-Penrose inverse of the first signal subspace partition.
 // This is critical for Total Least Squares (TLS) ESPRIT.
+
 void svd_pinv_complex_k2(Complex *A, int m, Complex *pinvA) {
     // 1. Compute the Gram matrix H = A^H * A (size 2x2)
     // This reduces the problem to an eigenvalue problem for the Hermitian matrix H.
@@ -616,7 +617,7 @@ float vel_clip(float v) {
                  subA1[i*k+j] = eigenvectors_all[i*l+j];
                  subB1[i*k+j] = eigenvectors_all[(i+1)*l+j];
              }
-         }
+        }
 
          // 5. Phi Matrix (Cell 6: phi_mat = pinv(subA1) @ subB1)
          // Logic: Solves the Total Least Squares problem to find the rotational 
