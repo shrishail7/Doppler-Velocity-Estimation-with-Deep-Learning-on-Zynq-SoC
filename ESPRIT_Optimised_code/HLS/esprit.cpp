@@ -1,0 +1,490 @@
+#include "esprit.h"
+
+static inline float fast_atan2f(float y, float x) {
+    if (x == 0.0f && y == 0.0f) return 0.0f;
+    float ax = fabsf(x);
+    float ay = fabsf(y);
+    float a = (ax < ay) ? (ax / ay) : (ay / ax);
+    float s = a * a;
+    float r = ((-0.0464964749f * s + 0.15931422f) * s - 0.327622764f) * s * a + a;
+    if (ay > ax) r = 1.570796327f - r;
+    if (x < 0.0f) r = 3.141592654f - r;
+    if (y < 0.0f) r = -r;
+    return r;
+}
+
+static inline Complex conj_complex(Complex a) {
+    Complex result;
+    result.real = a.real;
+    result.imag = -a.imag;
+    return result;
+}
+
+void matmul_complex_2d(const Complex A[10][10], const Complex B[10][10], Complex C[10][10], int n) {
+    #pragma HLS INLINE
+    MATMUL_CLEAR_I: for(int i=0; i<10; i++) {
+        #pragma HLS UNROLL
+        MATMUL_CLEAR_J: for(int j=0; j<10; j++) {
+            C[i][j].real = 0.0f;
+            C[i][j].imag = 0.0f;
+        }
+    }
+
+    MATMUL_I: for (int i = 0; i < 10; i++) {
+        #pragma HLS UNROLL
+        MATMUL_K: for (int k = 0; k < 10; k++) {
+            #pragma HLS PIPELINE II=1
+            float ar = A[i][k].real, ai = A[i][k].imag;
+            MATMUL_J: for (int j = 0; j < 10; j++) {
+                float br = B[k][j].real, bi = B[k][j].imag;
+                float cr = C[i][j].real, ci = C[i][j].imag;
+
+                C[i][j].real = cr + (ar * br - ai * bi);
+                C[i][j].imag = ci + (ar * bi + ai * br);
+            }
+        }
+    }
+}
+
+void transpose_conj_matrix_2d(const Complex A[10][10], Complex B[10][10], int n) {
+    #pragma HLS INLINE
+    TRANSPOSE_I: for(int i=0; i<10; i++) {
+        #pragma HLS UNROLL
+        TRANSPOSE_J: for(int j=0; j<10; j++) {
+            B[j][i] = conj_complex(A[i][j]);
+        }
+    }
+}
+
+void copy_matrix_2d(const Complex src[10][10], Complex dst[10][10], int n) {
+    #pragma HLS INLINE
+    COPY_MAT_I: for(int i=0; i<10; i++) {
+        #pragma HLS UNROLL
+        COPY_MAT_J: for(int j=0; j<10; j++) {
+            dst[i][j] = src[i][j];
+        }
+    }
+}
+
+void identity_matrix_2d(Complex A[10][10], int n) {
+    #pragma HLS INLINE
+    IDENTITY_I: for(int i=0; i<10; i++) {
+        #pragma HLS UNROLL
+        IDENTITY_J: for(int j=0; j<10; j++) {
+            A[i][j].real = (i == j) ? 1.0f : 0.0f;
+            A[i][j].imag = 0.0f;
+        }
+    }
+}
+
+void spatial_smoothing(const Complex *rec_signal, int N, Complex *output_matrix) {
+    #pragma HLS INLINE off
+    int l = N / 2;
+    int subarr = N + 1 - l;
+
+    float accum_r[100];
+    float accum_i[100];
+    SS_CLEAR: for(int i=0; i<l*l; i++) {
+        #pragma HLS PIPELINE II=1
+        accum_r[i] = 0.0f;
+        accum_i[i] = 0.0f;
+    }
+
+    SS_SUBARR: for (int i = 0; i < subarr; i++) {
+        const Complex *sig_ptr = &rec_signal[i];
+        SS_ROW: for(int j=0; j<l; j++) {
+            #pragma HLS PIPELINE II=1
+            int j_l = j * l;
+            float r_j_r = sig_ptr[j].real;
+            float r_j_i = sig_ptr[j].imag;
+
+            SS_COL: for(int k=0; k<l; k++) {
+                float r_k_r = sig_ptr[k].real;
+                float r_k_i = sig_ptr[k].imag;
+
+                accum_r[j_l + k] += r_j_r * r_k_r + r_j_i * r_k_i;
+                accum_i[j_l + k] += r_j_r * r_k_i - r_j_i * r_k_r;
+            }
+        }
+    }
+
+    float inv_subarr = 1.0f / subarr;
+
+    SS_NORM: for(int k=0; k<l*l; k++) {
+        #pragma HLS PIPELINE II=1
+        output_matrix[k].real = (accum_r[k] * inv_subarr);
+        output_matrix[k].imag = (accum_i[k] * inv_subarr);
+    }
+}
+
+
+void givensrotation_new(Complex a, Complex b, Complex *cos_out, Complex *sin_out) {
+    #pragma HLS INLINE off
+    float a_r = a.real, a_i = a.imag;
+    float b_r = b.real, b_i = b.imag;
+
+    float hypo = sqrtf(a_r*a_r + a_i*a_i + b_r*b_r + b_i*b_i);
+
+    if (hypo == 0.0f) {
+        cos_out->real = 1.0f; cos_out->imag = 0.0f;
+        sin_out->real = 0.0f; sin_out->imag = 0.0f;
+    } else {
+        cos_out->real = a_r / hypo;
+        cos_out->imag = a_i / hypo;
+        sin_out->real = b_r / hypo;
+        sin_out->imag = b_i / hypo;
+    }
+}
+
+void qr_givens_S_2d(Complex R_out[10][10], Complex Q_out[10][10], int n) {
+    #pragma HLS INLINE
+    Complex Q_temp[10][10];
+    #pragma HLS ARRAY_PARTITION variable=Q_temp complete dim=2
+    identity_matrix_2d(Q_temp, n);
+
+    QR_COL: for (int i = 0; i < 9; i++) {
+        QR_ROW: for (int j = i + 1; j < 10; j++) {
+            Complex cosf, sinf;
+            givensrotation_new(R_out[i][i], R_out[j][i], &cosf, &sinf);
+
+            float c_r = cosf.real, c_i = cosf.imag;
+            float s_r = sinf.real, s_i = sinf.imag;
+
+            float conj_c_r = c_r, conj_c_i = -c_i;
+            float conj_s_r = s_r, conj_s_i = -s_i;
+            float neg_s_r = -s_r, neg_s_i = -s_i;
+
+            QR_UPDATE: for (int k = 0; k < 10; k++) {
+                #pragma HLS UNROLL
+                float Ri_r = R_out[i][k].real, Ri_i = R_out[i][k].imag;
+                float Rj_r = R_out[j][k].real, Rj_i = R_out[j][k].imag;
+
+                float t1_r = Ri_r*conj_c_r - Ri_i*conj_c_i + Rj_r*conj_s_r - Rj_i*conj_s_i;
+                float t1_i = Ri_r*conj_c_i + Ri_i*conj_c_r + Rj_r*conj_s_i + Rj_i*conj_s_r;
+
+                float t2_r = Ri_r*neg_s_r - Ri_i*neg_s_i + Rj_r*c_r - Rj_i*c_i;
+                float t2_i = Ri_r*neg_s_i + Ri_i*neg_s_r + Rj_r*c_i + Rj_i*c_r;
+
+                R_out[i][k].real = t1_r;
+                R_out[i][k].imag = t1_i;
+
+                R_out[j][k].real = t2_r;
+                R_out[j][k].imag = t2_i;
+
+                float Qi_r = Q_temp[i][k].real, Qi_i = Q_temp[i][k].imag;
+                float Qj_r = Q_temp[j][k].real, Qj_i = Q_temp[j][k].imag;
+
+                float qt1_r = Qi_r*conj_c_r - Qi_i*conj_c_i + Qj_r*conj_s_r - Qj_i*conj_s_i;
+                float qt1_i = Qi_r*conj_c_i + Qi_i*conj_c_r + Qj_r*conj_s_i + Qj_i*conj_s_r;
+
+                float qt2_r = Qi_r*neg_s_r - Qi_i*neg_s_i + Qj_r*c_r - Qj_i*c_i;
+                float qt2_i = Qi_r*neg_s_i + Qi_i*neg_s_r + Qj_r*c_i + Qj_i*c_r;
+
+                Q_temp[i][k].real = qt1_r;
+                Q_temp[i][k].imag = qt1_i;
+
+                Q_temp[j][k].real = qt2_r;
+                Q_temp[j][k].imag = qt2_i;
+            }
+        }
+    }
+    transpose_conj_matrix_2d(Q_temp, Q_out, n);
+}
+
+void qr_algorithm_eig_single(const Complex *A_input, int n, int max_iterations, Complex *eigenvalues, Complex *eigenvectors) {
+    #pragma HLS INLINE off
+    Complex A[10][10], Q[10][10], R[10][10], TempA[10][10], TempQTotal[10][10];
+    #pragma HLS ARRAY_PARTITION variable=A complete dim=2
+    #pragma HLS ARRAY_PARTITION variable=Q complete dim=2
+    #pragma HLS ARRAY_PARTITION variable=R complete dim=2
+    #pragma HLS ARRAY_PARTITION variable=TempA complete dim=2
+    #pragma HLS ARRAY_PARTITION variable=TempQTotal complete dim=2
+
+    // Initial copy from 1D input to 2D local
+    for(int i=0; i<10; i++) {
+        for(int j=0; j<10; j++) {
+            #pragma HLS PIPELINE II=1
+            A[i][j] = A_input[i*10 + j];
+        }
+    }
+
+    // Initialize eigenvectors as identity
+    identity_matrix_2d(TempQTotal, 10);
+
+    QR_ITER: for (int iter = 0; iter < 10; iter++) {
+        // R = A
+        copy_matrix_2d(A, R, 10);
+
+        // QR Decomposition
+        qr_givens_S_2d(R, Q, 10);
+
+        // A = R * Q
+        matmul_complex_2d(R, Q, A, 10);
+
+        // eigenvectors = eigenvectors * Q
+        copy_matrix_2d(TempQTotal, TempA, 10);
+        matmul_complex_2d(TempA, Q, TempQTotal, 10);
+    }
+
+    // Output results back to 1D
+    for(int i=0; i<10; i++) {
+        #pragma HLS PIPELINE II=1
+        eigenvalues[i] = A[i][i];
+        for(int j=0; j<10; j++) {
+            eigenvectors[i*10 + j] = TempQTotal[i][j];
+        }
+    }
+}
+
+void svd_pinv_complex_k2(Complex *A, int m, Complex *pinvA) {
+    #pragma HLS INLINE off
+    float H[2][2][2] ;
+    for(int i=0; i<2; ++i)
+        for(int j=0; j<2; ++j) {
+            #pragma HLS PIPELINE II=1
+            H[i][j][0] = 0.0f;
+            H[i][j][1] = 0.0f;
+        }
+
+    PINV_H_K: for(int k=0; k<m; ++k) {
+        PINV_H_I: for(int i=0; i<2; ++i) {
+            float a_ik_r = A[k*2+i].real, a_ik_i = -A[k*2+i].imag;
+            PINV_H_J: for(int j=0; j<2; ++j) {
+                #pragma HLS PIPELINE II=1
+                float a_kj_r = A[k*2+j].real, a_kj_i = A[k*2+j].imag;
+                float hr = H[i][j][0];
+                float hi = H[i][j][1];
+                H[i][j][0] = hr + (a_ik_r * a_kj_r - a_ik_i * a_kj_i);
+                H[i][j][1] = hi + (a_ik_r * a_kj_i + a_ik_i * a_kj_r);
+            }
+        }
+    }
+
+    float trace_r = H[0][0][0] + H[1][1][0];
+    float trace_i = H[0][0][1] + H[1][1][1];
+    float ad_r = H[0][0][0] * H[1][1][0] - H[0][0][1] * H[1][1][1];
+    float ad_i = H[0][0][0] * H[1][1][1] + H[0][0][1] * H[1][1][0];
+    float bc_r = H[0][1][0] * H[1][0][0] - H[0][1][1] * H[1][0][1];
+    float bc_i = H[0][1][0] * H[1][0][1] + H[0][1][1] * H[1][0][0];
+
+    float det_r = ad_r - bc_r;
+    float det_i = ad_i - bc_i;
+
+    float tr_sq_r = trace_r*trace_r - trace_i*trace_i;
+    float tr_sq_i = 2*trace_r*trace_i;
+    float disc_r = tr_sq_r - 4*det_r;
+    float disc_i = tr_sq_i - 4*det_i;
+
+    float disc_mag = sqrtf(disc_r*disc_r + disc_i*disc_i);
+    float sqrt_disc_r = sqrtf(fmaxf(0.0f, (disc_mag + disc_r) / 2.0f));
+    float sign_i = (disc_i >= 0.0f) ? 1.0f : -1.0f;
+    float sqrt_disc_i = sign_i * sqrtf(fmaxf(0.0f, (disc_mag - disc_r) / 2.0f));
+
+    float lambda1_r = (trace_r + sqrt_disc_r) / 2.0f;
+    float lambda1_i = (trace_i + sqrt_disc_i) / 2.0f;
+    float lambda2_r = (trace_r - sqrt_disc_r) / 2.0f;
+    float lambda2_i = (trace_i - sqrt_disc_i) / 2.0f;
+
+    float l1 = sqrtf(lambda1_r*lambda1_r + lambda1_i*lambda1_i);
+    float l2 = sqrtf(lambda2_r*lambda2_r + lambda2_i*lambda2_i);
+
+    float tol = 1e-12;
+    float inv_l1 = (l1 > tol) ? 1.0f / l1 : 0.0f;
+    float inv_l2 = (l2 > tol) ? 1.0f / l2 : 0.0f;
+
+    float V[2][2][2] = {{{1, 0}, {0, 0}}, {{0, 0}, {1, 0}}};
+    float h11_l1_r = H[0][0][0] - lambda1_r;
+    float h11_l1_i = H[0][0][1] - lambda1_i;
+
+    if (H[0][1][0]*H[0][1][0] + H[0][1][1]*H[0][1][1] > 1e-20) {
+        float mag1 = sqrtf(H[0][1][0]*H[0][1][0] + H[0][1][1]*H[0][1][1] + h11_l1_r*h11_l1_r + h11_l1_i*h11_l1_i);
+        V[0][0][0] = H[0][1][0]/mag1; V[0][0][1] = H[0][1][1]/mag1;
+        V[1][0][0] = -h11_l1_r/mag1; V[1][0][1] = -h11_l1_i/mag1;
+    }
+
+    float h11_l2_r = H[0][0][0] - lambda2_r;
+    float h11_l2_i = H[0][0][1] - lambda2_i;
+    if (H[0][1][0]*H[0][1][0] + H[0][1][1]*H[0][1][1] > 1e-20) {
+        float mag2 = sqrtf(H[0][1][0]*H[0][1][0] + H[0][1][1]*H[0][1][1] + h11_l2_r*h11_l2_r + h11_l2_i*h11_l2_i);
+        V[0][1][0] = H[0][1][0]/mag2; V[0][1][1] = H[0][1][1]/mag2;
+        V[1][1][0] = -h11_l2_r/mag2; V[1][1][1] = -h11_l2_i/mag2;
+    }
+
+    float H_inv[2][2][2];
+    PINV_HINV_I: for(int i=0; i<2; ++i) {
+        PINV_HINV_J: for(int j=0; j<2; ++j) {
+            float sum_r = 0, sum_i = 0;
+            PINV_HINV_K: for(int k=0; k<2; ++k) {
+        #pragma HLS PIPELINE II=1
+                float inv_lk = (k == 0) ? inv_l1 : inv_l2;
+                float vik_r = V[i][k][0] * inv_lk, vik_i = V[i][k][1] * inv_lk;
+                float vhkj_r = V[j][k][0], vhkj_i = -V[j][k][1];
+                sum_r += vik_r * vhkj_r - vik_i * vhkj_i;
+                sum_i += vik_r * vhkj_i + vik_i * vhkj_r;
+            }
+            H_inv[i][j][0] = sum_r; H_inv[i][j][1] = sum_i;
+        }
+    }
+
+    PINV_APINV_I: for(int i=0; i<2; ++i) {
+        PINV_APINV_J: for(int j=0; j<m; ++j) {
+            float sum_r = 0, sum_i = 0;
+            PINV_APINV_K: for(int k=0; k<2; ++k) {
+        #pragma HLS PIPELINE II=1
+                float ah_kj_r = A[j*2+k].real, ah_kj_i = -A[j*2+k].imag;
+                sum_r += H_inv[i][k][0] * ah_kj_r - H_inv[i][k][1] * ah_kj_i;
+                sum_i += H_inv[i][k][0] * ah_kj_i + H_inv[i][k][1] * ah_kj_r;
+            }
+            pinvA[i*m+j].real = sum_r;
+            pinvA[i*m+j].imag = sum_i;
+        }
+    }
+}
+
+void eign_cal_ES(Complex *phi_mat, Complex *eigenvalues) {
+    #pragma HLS INLINE off
+    float r00 = phi_mat[0].real, i00 = phi_mat[0].imag;
+    float r01 = phi_mat[1].real, i01 = phi_mat[1].imag;
+    float r10 = phi_mat[2].real, i10 = phi_mat[2].imag;
+    float r11 = phi_mat[3].real, i11 = phi_mat[3].imag;
+
+    float t_r = r00 + r11;
+    float t_i = i00 + i11;
+
+    float det_r = r00 * r11 - i00 * i11 - (r01 * r10 - i01 * i10);
+    float det_i = r00 * i11 + i00 * r11 - (r01 * i10 + i01 * r10);
+
+    float t2_r = t_r * t_r - t_i * t_i;
+    float t2_i = 2 * t_r * t_i;
+
+    float disc_r = t2_r - 4.0f * det_r;
+    float disc_i = t2_i - 4.0f * det_i;
+
+    float disc_mag = sqrtf(disc_r * disc_r + disc_i * disc_i);
+    float sqrt_disc_r = sqrtf(fmaxf(0.0f, (disc_mag + disc_r) / 2.0f));
+    float sign_i = (disc_i >= 0.0f) ? 1.0f : -1.0f;
+    float sqrt_disc_i = sign_i * sqrtf(fmaxf(0.0f, (disc_mag - disc_r) / 2.0f));
+
+    eigenvalues[0].real = ((t_r + sqrt_disc_r) / 2.0f);
+    eigenvalues[0].imag = ((t_i + sqrt_disc_i) / 2.0f);
+
+    eigenvalues[1].real = ((t_r - sqrt_disc_r) / 2.0f);
+    eigenvalues[1].imag = ((t_i - sqrt_disc_i) / 2.0f);
+}
+
+void sort_eigenvalues(Complex *eigenvalues, Complex *eigenvectors, int n) {
+    #pragma HLS INLINE off
+    SORT_OUTER: for (int i = 0; i < n - 1; i++) {
+        SORT_INNER: for (int j = 0; j < n - i - 1; j++) {
+            float mag1_sq = eigenvalues[j].real*eigenvalues[j].real + eigenvalues[j].imag*eigenvalues[j].imag;
+            float mag2_sq = eigenvalues[j+1].real*eigenvalues[j+1].real + eigenvalues[j+1].imag*eigenvalues[j+1].imag;
+            if (mag1_sq < mag2_sq) {
+                Complex tV = eigenvalues[j]; eigenvalues[j] = eigenvalues[j+1]; eigenvalues[j+1] = tV;
+                SORT_SWAP: for (int r = 0; r < n; r++) {
+                    #pragma HLS PIPELINE II=1
+                    Complex tP = eigenvectors[r*n+j]; eigenvectors[r*n+j] = eigenvectors[r*n+j+1]; eigenvectors[r*n+j+1] = tP;
+                }
+            }
+        }
+    }
+}
+
+float vel_clip(float v) {
+    if (v < -30.0f) return -30.0f;
+    if (v > 30.0f) return 30.0f;
+    return v;
+}
+
+#ifdef ESPRIT_IP
+void esprit_hls(hls::stream<axis_data> &in_stream, hls::stream<axis_data> &out_stream)
+{
+    #pragma HLS INTERFACE ap_ctrl_none port=return
+    #pragma HLS INTERFACE axis register both port=in_stream
+    #pragma HLS INTERFACE axis register both port=out_stream
+
+    Complex rec_signal[N_SAMPLES];
+    axis_data local_read, local_write;
+
+    READ_L1: for (int i = 0; i < N_SAMPLES; i++) {
+        #pragma HLS PIPELINE II=1
+        local_read = in_stream.read();
+        rec_signal[i].real = local_read.data;
+
+        local_read = in_stream.read();
+        rec_signal[i].imag = local_read.data;
+    }
+
+    int N = N_SAMPLES;
+    int k = 2;
+    int l = N / 2;
+
+    Complex autocorrelation_matrix[100];
+    spatial_smoothing(rec_signal, N, autocorrelation_matrix);
+
+    Complex eigenvalues_all[10];
+    Complex eigenvectors_all[100];
+    qr_algorithm_eig_single(autocorrelation_matrix, l, 10, eigenvalues_all, eigenvectors_all);
+
+    sort_eigenvalues(eigenvalues_all, eigenvectors_all, l);
+
+    int rows_sub = l - 1;
+    Complex subA1[18];
+    Complex subB1[18];
+
+    EXTRACT_L1: for(int j=0; j<k; j++) {
+        #pragma HLS PIPELINE II=1
+        EXTRACT_L2: for(int i=0; i<rows_sub; i++) {
+            subA1[i*k+j] = eigenvectors_all[i*l+j];
+            subB1[i*k+j] = eigenvectors_all[(i+1)*l+j];
+        }
+    }
+
+    Complex pinvA1[18];
+    svd_pinv_complex_k2(subA1, rows_sub, pinvA1);
+    Complex phi_mat[4];
+
+    PHI_L1: for(int i=0; i<k; i++) {
+        int i_rows = i * rows_sub;
+        PHI_L2: for(int j=0; j<k; j++) {
+            #pragma HLS PIPELINE II=1
+            float sum_r = 0.0f, sum_i = 0.0f;
+            PHI_L3: for(int m=0; m<rows_sub; m++) {
+                float pr = pinvA1[i_rows + m].real, pi = pinvA1[i_rows + m].imag;
+                float br = subB1[m*k+j].real, bi = subB1[m*k+j].imag;
+                sum_r += pr * br - pi * bi;
+                sum_i += pr * bi + pi * br;
+            }
+            phi_mat[i*k+j].real = sum_r;
+            phi_mat[i*k+j].imag = sum_i;
+        }
+    }
+
+    Complex phi_eigs[2];
+    eign_cal_ES(phi_mat, phi_eigs);
+    float estimates[2];
+    CALC_L1: for(int i=0; i<k; i++) {
+        #pragma HLS PIPELINE II=1
+        float angle = fast_atan2f(phi_eigs[i].imag, phi_eigs[i].real);
+        estimates[i] = -angle / 0.005f;
+    }
+
+    if (estimates[0] > estimates[1]) {
+        float temp = estimates[0];
+        estimates[0] = estimates[1];
+        estimates[1] = temp;
+    }
+
+    float clipped0 = vel_clip(estimates[0]);
+    float clipped1 = vel_clip(estimates[1]);
+
+    local_write.data = clipped0;
+    local_write.keep = -1;
+    local_write.last = 0;
+    out_stream.write(local_write);
+
+    local_write.data = clipped1;
+    local_write.keep = -1;
+    local_write.last = 1;
+    out_stream.write(local_write);
+}
+#endif
